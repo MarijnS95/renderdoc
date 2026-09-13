@@ -799,6 +799,9 @@ VkResult WrappedVulkan::vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo
 
   bool brokenGetDeviceProcAddr = false;
 
+  // #3903 instrumentation: what this caller asked for, before pApplicationInfo is repointed below
+  uint32_t requestedVersion = 0;
+
   // override applicationInfo with RenderDoc's, but preserve apiVersion
   if(modifiedCreateInfo.pApplicationInfo)
   {
@@ -807,7 +810,10 @@ VkResult WrappedVulkan::vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo
       brokenGetDeviceProcAddr = true;
 
     if(modifiedCreateInfo.pApplicationInfo->apiVersion >= VK_API_VERSION_1_0)
-      renderdocAppInfo.apiVersion = modifiedCreateInfo.pApplicationInfo->apiVersion;
+    {
+      requestedVersion = modifiedCreateInfo.pApplicationInfo->apiVersion;
+      renderdocAppInfo.apiVersion = requestedVersion;
+    }
 
     if(Vulkan_Debug_ReplaceAppInfo())
     {
@@ -828,7 +834,14 @@ VkResult WrappedVulkan::vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo
   // if we forced on API validation, it's also available
   m_LayersEnabled[VkCheckLayer_unique_objects] |= RenderDoc::Inst().GetCaptureOptions().apiValidation;
 
+  RDCLOG("vkCreateInstance begin: tid %llu requested apiVersion %x", Threading::GetCurrentID(),
+         requestedVersion);
+
+  PerformanceTimer createTimer;
+
   VkResult ret = createFunc(&modifiedCreateInfo, NULL, pInstance);
+
+  const double createMS = createTimer.GetMilliseconds();
 
   m_Instance = *pInstance;
 
@@ -853,6 +866,10 @@ VkResult WrappedVulkan::vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo
   // whether or not we're using it, we updated the apiVersion in renderdocAppInfo
   if(renderdocAppInfo.apiVersion > VK_API_VERSION_1_0)
     record->instDevInfo->vulkanVersion = renderdocAppInfo.apiVersion;
+
+  RDCLOG("vkCreateInstance end: tid %llu requested %x, recorded %x, driver call %.2fms%s",
+         Threading::GetCurrentID(), requestedVersion, record->instDevInfo->vulkanVersion, createMS,
+         requestedVersion != record->instDevInfo->vulkanVersion ? "   <-- OVERWRITTEN" : "");
 
   std::set<rdcstr> availablePhysDeviceFunctions;
 
@@ -5132,6 +5149,7 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
 
       record->instDevInfo->vulkanVersion =
           RDCMIN(physProps.apiVersion, GetRecord(m_Instance)->instDevInfo->vulkanVersion);
+      RDCERR("Device create? With vulkanVersion %x", record->instDevInfo->vulkanVersion);
 
 #undef CheckExt
 #define CheckExt(name, ver) \
